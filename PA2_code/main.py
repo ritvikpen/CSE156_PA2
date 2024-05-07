@@ -1,4 +1,6 @@
 import torch
+from torch import nn
+from torch import optim
 from torch.utils.data import DataLoader
 from torch.nn.utils.rnn import pad_sequence
 import os
@@ -6,6 +8,7 @@ import os
 from tokenizer import SimpleTokenizer
 from dataset import SpeechesClassificationDataset, LanguageModelingDataset
 
+from transformer import TransformerEncoder, FeedforwardClassifier
 
 seed = 42
 
@@ -116,11 +119,30 @@ def main():
     train_LM_dataset = LanguageModelingDataset(tokenizer, lmtrainText,  block_size)
     train_LM_loader = DataLoader(train_LM_dataset, batch_size=batch_size, shuffle=True)
 
-     # for the classification  task, you will train for a fixed number of epochs like this:
+   # Initialize the encoder and classifier
+    encoder = TransformerEncoder(tokenizer.vocab_size, n_embd, n_head, n_layer)
+    classifier = FeedforwardClassifier(n_embd, hidden_dim, num_classes)
+
+    # Define the loss function and optimizer
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(list(encoder.parameters()) + list(classifier.parameters()))
+
+    # for the classification task, you will train for a fixed number of epochs like this:
     for epoch in range(epochs_CLS):
         for xb, yb in train_CLS_loader:
             xb, yb = xb.to(device), yb.to(device)
-            # CLS training code here
+
+            # Pass the input data through the encoder and classifier
+            embeddings = encoder(xb)
+            outputs = classifier(embeddings)
+
+            # Compute the loss
+            loss = criterion(outputs, yb)
+
+            # Backpropagate the loss and update the parameters
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
 
     # for the language modeling task, you will iterate over the training data for a fixed number of iterations like this:
