@@ -1,8 +1,20 @@
-# add all  your Encoder and Decoder code here
 import torch
-from torch import nn
-from torch import optim
+import torch.nn as nn
+from torch.nn import functional as F
 
+import torch
+from torch.utils.data import DataLoader
+from torch.nn.utils.rnn import pad_sequence
+import os
+
+from tokenizer import SimpleTokenizer
+from dataset import SpeechesClassificationDataset, LanguageModelingDataset
+
+
+seed = 42
+torch.manual_seed(seed) # Set seed for reproducibility
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 """ Hyperparameters to use for training to roughly match 
 the numbers mentioned in the assignment description """
@@ -27,28 +39,52 @@ n_hidden = 100  # Hidden size for the classifier
 n_output = 3  # Output size for the classifier, we have 3 classes
 epochs_CLS = 15 # epochs for classifier training
 
-class TransformerEncoder(nn.Module):
-    def __init__(self, vocab_size, n_embd, n_head, n_layer):
-        super(TransformerEncoder, self).__init__()
-        self.embedding = nn.Embedding(vocab_size, n_embd)
-        self.encoder_layer = nn.TransformerEncoderLayer(d_model=n_embd, nhead=n_head)
-        self.transformer_encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=n_layer)
+# add all  your Encoder and Decoder code here
+class Encoder(nn.Module):
 
-    def forward(self, src):
-        src = self.embedding(src)
-        output = self.transformer_encoder(src)
-        return output.mean(dim=1)
+    def __init__(self, vocab_size):
+        super().__init__()
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
+        self.position_embedding_table = nn.Embedding(block_size, n_embd)
+        self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
+        self.ln_f = nn.LayerNorm(n_embd)
+        self.apply(self._init_weights)
 
-class FeedforwardClassifier(nn.Module):
-    def __init__(self, n_embd, hidden_dim, num_classes):
-        super(FeedforwardClassifier, self).__init__()
-        self.fc1 = nn.Linear(n_embd, hidden_dim)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(hidden_dim, num_classes)
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear) or isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
 
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.relu(x)
-        x = self.fc2(x)
-        return x
-    
+    def forward(self, idx, targets=None):
+        print("DEVICE:", device)
+        B, T = idx.shape
+        tok_emb = self.token_embedding_table(idx)
+        pos_emb = self.position_embedding_table(torch.arange(T, device=device))
+        x = tok_emb + pos_emb
+
+        all_attns = []
+        for block in self.blocks:
+            x, attns = block(x)
+            all_attns.append(attns)
+
+        x = self.ln_f(x)
+        return x, all_attns  # Return embeddings along with attention scores
+
+
+    def generate(self, idx, max_new_tokens):
+        # idx is (B, T) array of indices in the current context
+        for _ in range(max_new_tokens):
+            # crop idx to the last block_size tokens
+            idx_cond = idx[:, -block_size:]
+            # get the predictions
+            logits, loss = self(idx_cond)
+            # focus only on the last time step
+            logits = logits[:, -1, :] # becomes (B, C)
+            # apply softmax to get probabilities
+            probs = F.softmax(logits, dim=-1) # (B, C)
+            # sample from the distribution
+            idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
+            # append sampled index to the running sequence
+            idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
+        return idx
