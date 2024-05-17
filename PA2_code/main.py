@@ -6,6 +6,7 @@ import os
 from tokenizer import SimpleTokenizer
 from dataset import SpeechesClassificationDataset, LanguageModelingDataset
 
+from transformer import *
 
 seed = 42
 torch.manual_seed(seed) # Set seed for reproducibility
@@ -49,8 +50,6 @@ def load_texts(directory):
             texts.append(file.read())
     return texts
 
-
-
 def collate_batch(batch):
     """ Collate a batch of data into a single tensor with padding."""
     data, labels = zip(*batch)  # Separate the data and labels
@@ -77,7 +76,6 @@ def compute_classifier_accuracy(classifier, data_loader):
         accuracy = (100 * total_correct / total_samples)
         classifier.train()
         return accuracy
-
 
 def compute_perplexity(decoderLMmodel, data_loader, eval_iters=100):
     """ Compute the perplexity of the decoderLMmodel on the data in data_loader.
@@ -109,20 +107,87 @@ def main():
 
     train_CLS_dataset = SpeechesClassificationDataset(tokenizer, "speechesdataset/train_CLS.tsv")
     train_CLS_loader = DataLoader(train_CLS_dataset, batch_size=batch_size,collate_fn=collate_batch,shuffle=True)
+    test_CLS_dataset = SpeechesClassificationDataset(tokenizer, "speechesdataset/test_CLS.tsv")
+    test_CLS_loader = DataLoader(test_CLS_dataset, batch_size=batch_size,collate_fn=collate_batch)
 
+    # Initialize Encoder
+    encoder = Encoder(tokenizer.vocab_size)
+    encoder.to(device)
+    total_enc_params = sum(p.numel() for p in encoder.parameters())
+    print("Total number of encoder parameters:", total_enc_params)
+
+    # Initialize Decoder
+    decoder = Decoder(tokenizer.vocab_size)
+    decoder.to(device)
+    total_dec_params = sum(p.numel() for p in decoder.parameters())
+    print("Total number of decoder parameters:", total_dec_params)
+
+    # Initialize Classifier
+    classifier = FeedForwardClassifier(n_input, n_hidden, n_output)
+    classifier.to(device)
+
+    # Optimizers
+    optimizer_enc = torch.optim.Adam(encoder.parameters(), lr=learning_rate)
+    optimizer_cls = torch.optim.Adam(classifier.parameters(), lr=learning_rate)
+    optimizer_dec = torch.optim.Adam(decoder.parameters(), lr=learning_rate)
+
+    # Define the joint loss function
+    criterion = torch.nn.CrossEntropyLoss()
   
+    # LM Training Data
     inputfile = "speechesdataset/train_LM.txt"
     with open(inputfile, 'r', encoding='utf-8') as f:
         lmtrainText = f.read()
     train_LM_dataset = LanguageModelingDataset(tokenizer, lmtrainText,  block_size)
     train_LM_loader = DataLoader(train_LM_dataset, batch_size=batch_size, shuffle=True)
 
-     # for the classification  task, you will train for a fixed number of epochs like this:
+    # LM HBush Data
+    inputfile = "speechesdataset/test_LM_hbush.txt"
+    with open(inputfile, 'r', encoding='utf-8') as f:
+        lmtestText1 = f.read()
+    test_LM_hbush_dataset = LanguageModelingDataset(tokenizer, lmtestText1,  block_size)
+    test_LM_hbush_loader = DataLoader(test_LM_hbush_dataset, batch_size=batch_size, shuffle=True)
+
+    # LM Obama Data
+    inputfile = "speechesdataset/test_LM_obama.txt"
+    with open(inputfile, 'r', encoding='utf-8') as f:
+        lmtestText2 = f.read()
+    test_LM_obama_dataset = LanguageModelingDataset(tokenizer, lmtestText2,  block_size)
+    test_LM_obama_loader = DataLoader(test_LM_obama_dataset, batch_size=batch_size, shuffle=True)
+
+    # LM WBush Data
+    inputfile = "speechesdataset/test_LM_wbush.txt"
+    with open(inputfile, 'r', encoding='utf-8') as f:
+        lmtestText3 = f.read()
+    test_LM_wbush_dataset = LanguageModelingDataset(tokenizer, lmtestText3,  block_size)
+    test_LM_wbush_loader = DataLoader(test_LM_wbush_dataset, batch_size=batch_size, shuffle=True)
+
+    # for the classification  task, you will train for a fixed number of epochs like this:
     for epoch in range(epochs_CLS):
+
+        epoch_loss = 0.0
+
         for xb, yb in train_CLS_loader:
             xb, yb = xb.to(device), yb.to(device)
             # CLS training code here
+            embeddings, _ = encoder(xb)
+            outputs = classifier(embeddings.mean(dim=1))
+            loss_cls = criterion(outputs, yb)
+            loss_enc = torch.tensor(0.0, requires_grad=True).to(device)
+            joint_loss = loss_cls + loss_enc
 
+            optimizer_cls.zero_grad()
+            optimizer_enc.zero_grad()
+            joint_loss.backward()
+            optimizer_cls.step()
+            optimizer_enc.step()
+
+            epoch_loss += joint_loss.item()
+
+        train_accuracy = compute_classifier_accuracy(encoder, classifier, train_CLS_loader)
+        test_accuracy = compute_classifier_accuracy(encoder, classifier, test_CLS_loader)
+        print(f"Epoch [{epoch+1}/{epochs_CLS}], Loss: {epoch_loss / len(train_CLS_loader):.6f}, Train Accuracy: {train_accuracy:.2f}%, Test Accuracy: {test_accuracy:.2f}%")
+        
 
     # for the language modeling task, you will iterate over the training data for a fixed number of iterations like this:
     for i, (xb, yb) in enumerate(train_LM_loader):
@@ -131,9 +196,19 @@ def main():
         xb, yb = xb.to(device), yb.to(device)
         # LM training code here
 
-    
+        _, loss = decoder(xb, yb)
+        loss = loss.mean()  # Compute the mean loss across tokens
+        
+        optimizer_dec.zero_grad()
+        loss.backward()
+        optimizer_dec.step()
 
-
+        if (i + 1) % eval_interval == 0:
+            train_perplexity = compute_perplexity(decoder, train_LM_loader, eval_iters)
+            hbush_perplexity = compute_perplexity(decoder, test_LM_hbush_loader, eval_iters)
+            obama_perplexity = compute_perplexity(decoder, test_LM_obama_loader, eval_iters)
+            wbush_perplexity = compute_perplexity(decoder, test_LM_wbush_loader, eval_iters)
+            print(f"Iteration [{i+1}/{max_iters}], Loss: {loss.item():.6f}, Train Perplexity: {train_perplexity:.6f}, HBush Perplexity: {hbush_perplexity:.6f}, Obama Perplexity: {obama_perplexity:.6f}, WBush Perplexity: {wbush_perplexity:.6f}")
 
 if __name__ == "__main__":
     main()
