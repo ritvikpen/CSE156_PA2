@@ -6,10 +6,10 @@ import os
 from tokenizer import SimpleTokenizer
 from dataset import SpeechesClassificationDataset, LanguageModelingDataset
 
-from transformer import *
+from transformer import Encoder, Decoder, FeedForwardClassifier
 
 seed = 42
-torch.manual_seed(seed) # Set seed for reproducibility
+torch.manual_seed(seed)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -61,7 +61,7 @@ def collate_batch(batch):
     labels = torch.stack(labels)  
     return padded_sequences, labels
 
-def compute_classifier_accuracy(classifier, data_loader):
+def compute_classifier_accuracy(encoder, classifier, data_loader):
     """ Compute the accuracy of the classifier on the data in data_loader."""
     classifier.eval()
     total_correct = 0
@@ -69,13 +69,16 @@ def compute_classifier_accuracy(classifier, data_loader):
     with torch.no_grad():
         for X, Y in data_loader:
             X, Y = X.to(device), Y.to(device)
-            outputs = classifier(X)
+            # Forward pass through encoder
+            embeddings, _ = encoder(X)
+            outputs = classifier(embeddings.mean(dim=1))
             _, predicted = torch.max(outputs.data, 1)
             total_correct += (predicted == Y).sum().item()
             total_samples += Y.size(0)
         accuracy = (100 * total_correct / total_samples)
         classifier.train()
         return accuracy
+
 
 def compute_perplexity(decoderLMmodel, data_loader, eval_iters=100):
     """ Compute the perplexity of the decoderLMmodel on the data in data_loader.
@@ -85,11 +88,9 @@ def compute_perplexity(decoderLMmodel, data_loader, eval_iters=100):
     losses= []
     for X, Y in data_loader:
         X, Y = X.to(device), Y.to(device)
-        loss = decoderLMmodel(X, Y) # your model should be computing the cross entropy loss
+        _, loss = decoderLMmodel(X, Y) # your model should be computing the cross entropy loss
         losses.append(loss.item())
-        total_loss += loss.item()
         if len(losses) >= eval_iters: break
-
 
     losses = torch.tensor(losses)
     mean_loss = losses.mean()
@@ -105,6 +106,7 @@ def main():
     tokenizer = SimpleTokenizer(' '.join(texts)) # create a tokenizer from the data
     print("Vocabulary size is", tokenizer.vocab_size)
 
+    # Data for classifier
     train_CLS_dataset = SpeechesClassificationDataset(tokenizer, "speechesdataset/train_CLS.tsv")
     train_CLS_loader = DataLoader(train_CLS_dataset, batch_size=batch_size,collate_fn=collate_batch,shuffle=True)
     test_CLS_dataset = SpeechesClassificationDataset(tokenizer, "speechesdataset/test_CLS.tsv")
@@ -164,12 +166,11 @@ def main():
 
     # for the classification  task, you will train for a fixed number of epochs like this:
     for epoch in range(epochs_CLS):
-
         epoch_loss = 0.0
 
         for xb, yb in train_CLS_loader:
             xb, yb = xb.to(device), yb.to(device)
-            # CLS training code here
+        
             embeddings, _ = encoder(xb)
             outputs = classifier(embeddings.mean(dim=1))
             loss_cls = criterion(outputs, yb)
@@ -194,7 +195,6 @@ def main():
         if i >= max_iters:
             break
         xb, yb = xb.to(device), yb.to(device)
-        # LM training code here
 
         _, loss = decoder(xb, yb)
         loss = loss.mean()  # Compute the mean loss across tokens
@@ -210,5 +210,7 @@ def main():
             wbush_perplexity = compute_perplexity(decoder, test_LM_wbush_loader, eval_iters)
             print(f"Iteration [{i+1}/{max_iters}], Loss: {loss.item():.6f}, Train Perplexity: {train_perplexity:.6f}, HBush Perplexity: {hbush_perplexity:.6f}, Obama Perplexity: {obama_perplexity:.6f}, WBush Perplexity: {wbush_perplexity:.6f}")
 
+
 if __name__ == "__main__":
     main()
+
